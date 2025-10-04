@@ -28,6 +28,7 @@ import java.util.Properties;
 public class UserEventListener implements EventListenerProvider {
 
     private final String userRegisterUrl;
+    private final String backendApiKey;
     private final KeycloakSession session;
     private static final Logger logger = LoggerFactory.getLogger(UserEventListener.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -35,6 +36,7 @@ public class UserEventListener implements EventListenerProvider {
     public UserEventListener(KeycloakSession session) {
         this.session = session;
         this.userRegisterUrl = loadUserRegisterUrlFromEnv();
+        this.backendApiKey = loadBackendApiKeyFromEnv();
         logger.info("UserEventListener initialized with URL: {}", userRegisterUrl);
     }
 
@@ -72,7 +74,7 @@ public class UserEventListener implements EventListenerProvider {
             
             // Способ 2: Если не найдено в env, читаем из .env файла
             if (url == null || url.trim().isEmpty()) {
-                url = loadFromEnvFile();
+                url = loadFromEnvFile("USER_REGISTER_URL");
             }
             
             // Способ 3: Значение по умолчанию
@@ -89,7 +91,35 @@ public class UserEventListener implements EventListenerProvider {
         return url;
     }
 
-    private String loadFromEnvFile() {
+    private String loadBackendApiKeyFromEnv() {
+        String apiKey = null;
+        
+        try {
+            // Способ 1: Чтение из системных переменных окружения
+            apiKey = System.getenv("BACKEND_API_KEY");
+            
+            // Способ 2: Если не найдено в env, читаем из .env файла
+            if (apiKey == null || apiKey.trim().isEmpty()) {
+                apiKey = loadFromEnvFile("BACKEND_API_KEY");
+            }
+            
+            // Способ 3: Ошибка, если токен не найден
+            if (apiKey == null || apiKey.trim().isEmpty()) {
+                logger.error("BACKEND_API_KEY not found in environment variables or .env file. API key is required for authentication.");
+                throw new RuntimeException("BACKEND_API_KEY is required but not found in environment");
+            }
+            
+            logger.info("Backend API key loaded successfully");
+            
+        } catch (Exception e) {
+            logger.error("Error loading BACKEND_API_KEY from environment", e);
+            throw new RuntimeException("Failed to load BACKEND_API_KEY", e);
+        }
+        
+        return apiKey;
+    }
+
+    private String loadFromEnvFile(String key) {
         try {
             // Пробуем разные возможные пути к .env файлу
             String[] possiblePaths = {
@@ -103,10 +133,10 @@ public class UserEventListener implements EventListenerProvider {
                 if (Files.exists(Paths.get(path))) {
                     Properties props = new Properties();
                     props.load(Files.newInputStream(Paths.get(path)));
-                    String url = props.getProperty("USER_REGISTER_URL");
-                    if (url != null && !url.trim().isEmpty()) {
-                        logger.info("Loaded USER_REGISTER_URL from .env file: {}", path);
-                        return url.trim();
+                    String value = props.getProperty(key);
+                    if (value != null && !value.trim().isEmpty()) {
+                        logger.info("Loaded {} from .env file: {}", key, path);
+                        return value.trim();
                     }
                 }
             }
@@ -123,6 +153,11 @@ public class UserEventListener implements EventListenerProvider {
             return;
         }
         
+        if (backendApiKey == null || backendApiKey.trim().isEmpty()) {
+            logger.error("Cannot send POST request: BACKEND_API_KEY is not configured");
+            return;
+        }
+        
         try (CloseableHttpClient client = HttpClients.createDefault()) {
             HttpPost post = new HttpPost(url);
             String json = objectMapper.writeValueAsString(data);
@@ -130,14 +165,21 @@ public class UserEventListener implements EventListenerProvider {
             post.setEntity(entity);
             post.setHeader("Accept", "application/json");
             post.setHeader("Content-type", "application/json; charset=UTF-8");
+            post.setHeader("X-Secret-Token", backendApiKey); // Добавляем секретный токен
+            
+            logger.debug("Sending POST request to {} with headers: {}", url, post.getAllHeaders());
             
             HttpResponse response = client.execute(post);
             int statusCode = response.getStatusLine().getStatusCode();
             String responseBody = response.getEntity() != null ? 
                 EntityUtils.toString(response.getEntity(), "UTF-8") : "No content";
                 
-            logger.info("POST request to {} completed with status code: {} and response: {}", 
-                url, statusCode, responseBody);
+            if (statusCode >= 200 && statusCode < 300) {
+                logger.info("POST request to {} completed successfully with status code: {}", url, statusCode);
+            } else {
+                logger.warn("POST request to {} completed with status code: {} and response: {}", 
+                    url, statusCode, responseBody);
+            }
         } catch (IOException e) {
             logger.error("Error sending POST request to {}", url, e);
         }
